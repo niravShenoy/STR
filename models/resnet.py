@@ -1,4 +1,5 @@
 import torch.nn as nn
+import torch
 
 from utils.builder import get_builder
 from args import args
@@ -134,6 +135,7 @@ class ResNet(nn.Module):
         return nn.Sequential(*layers)
 
     def forward(self, x):
+        torch.cuda.empty_cache()
         x = self.conv1(x)
         if self.bn1 is not None:
             x = self.bn1(x)
@@ -153,11 +155,11 @@ class ResNet(nn.Module):
 
 
 # ResNet }}}
-def ResNet18(pretrained=False):
+def ResNet18(num_classes, pretrained=True):
     # TODO: pretrained
-    return ResNet(get_builder(), BasicBlock, [2, 2, 2, 2], 1000)
+    return ResNet(get_builder(), BasicBlock, [2, 2, 2, 2], num_classes)
 
 
-def ResNet50(pretrained=False):
+def ResNet50(num_classes, pretrained=True):
     # TODO: pretrained
-    return ResNet(get_builder(), Bottleneck, [3, 4, 6, 3], 1000)
+    return ResNet(get_builder(), Bottleneck, [3, 4, 6, 3], num_classes)
