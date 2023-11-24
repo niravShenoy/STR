@@ -106,3 +106,42 @@ class GMPConv(nn.Conv2d):
         )
 
         return x
+
+# Applied by setting "conv_type" to "STRConvMask" in the YAML file
+class STRConvMask(nn.Conv2d):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.activation = torch.relu
+        self.mask = torch.ones_like(self.weight).to(self.weight.device)
+
+        if parser_args.sparse_function == 'sigmoid':
+            self.f = torch.sigmoid
+            self.sparseThreshold = nn.Parameter(initialize_sInit())
+        else:
+            self.sparseThreshold = nn.Parameter(initialize_sInit())
+            
+    def forward(self, x):
+        sparseWeight = sparseFunction(self.weight, self.sparseThreshold, self.activation, self.f)
+        sparseWeight = self.mask.to(self.weight.device) * sparseWeight
+        # We need to update the mask during the zero-cost neuroregeneration phase
+        # By simply applying the mask to the weight, sparseWeight already excludes the zeroed out weights since Sigmoid > 0
+        x = F.conv2d(
+            x, sparseWeight, self.bias, self.stride, self.padding, self.dilation, self.groups
+        )
+        return x
+    
+    def set_er_mask(self, p):
+        self.mask = torch.zeros_like(self.weight).bernoulli_(p)
+
+    def getSparsity(self, f=torch.sigmoid):
+        # sparseWeight = self.mask.to(self.weight.device) * self.weight
+        sparseWeight = sparseFunction(self.weight, self.sparseThreshold, self.activation, self.f)
+        sparseWeight = self.mask.to(self.weight.device) * sparseWeight
+        temp = sparseWeight.detach().cpu()
+        temp[temp!=0] = 1
+        # Returning the actual threshold value instead of the sigmoid value
+        return (100 - temp.mean().item()*100), temp.numel(), self.sparseThreshold.item()
+    
+    def apply_mask(self):
+        self.weight.data = self.mask.to(self.weight.device) * self.weight

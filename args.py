@@ -12,15 +12,19 @@ def parse_arguments():
 
     # General Config
     parser.add_argument(
-        "--data", help="path to dataset base directory", default="/mnt/disk1/datasets"
+        "--data", help="path to dataset base directory", default=""
     )
     parser.add_argument("--optimizer", help="Which optimizer to use", default="sgd")
     parser.add_argument("--set", help="name of dataset", type=str, default="ImageNet")
     parser.add_argument(
         "-a", "--arch", metavar="ARCH", default="ResNet18", help="model architecture"
     )
+    
+    # parser.add_argument(
+    #     "--config", help="Config file to use (see configs dir)", default=None
+    # )
     parser.add_argument(
-        "--config", help="Config file to use (see configs dir)", default=None
+        "--config", help="Config file to use (see configs dir)", default="configs/largescale/resnet18-str.yaml"
     )
     parser.add_argument(
         "--log-dir", help="Where to save the runs. If None use ./runs", default=None
@@ -241,6 +245,61 @@ def parse_arguments():
     parser.add_argument(
         "--ignore-pretrained-weights", action="store_true", help="ignore the weights of a pretrained model."
     )
+
+    # Dynamic Sparse Training related arguments
+    parser.add_argument(
+        '--growth', type=str, default='gradient', help='Growth mode. Choose from: momentum, random, and momentum_neuron.'
+        )
+    parser.add_argument(
+        '--prune', type=str, default='magnitude', help='Death mode / pruning mode. Choose from: magnitude, SET, threshold, CS_death.'
+        )
+    parser.add_argument(
+        '--redistribution', type=str, default='none', help='Redistribution mode. Choose from: momentum, magnitude, nonzeros, or none.'
+        )
+    parser.add_argument(
+        '-- -rate', type=float, default=0.50, help='The pruning rate / death rate for Zero-Cost Neuroregeneration.'
+        )
+    parser.add_argument(
+        '--pruning-rate', type=float, default=0.50, help='The pruning rate / death rate.'
+        )
+    parser.add_argument(
+        '--sparse', action='store_true', help='Enable sparse mode. Default: True.'
+        )
+    parser.add_argument(
+        '--fix', action='store_true', help='Fix topology during training. Default: True.'
+        )
+    parser.add_argument(
+        '--update-frequency', type=int, default=100, metavar='N', help='how many iterations to train between mask update'
+        )
+    parser.add_argument(
+        '--sparse-init', type=str, default='ERK, uniform distributions for sparse training, global pruning and uniform pruning for pruning', help='sparse initialization'
+        )
+    parser.add_argument(
+        '--dst-prune-const', action='store_true', help='If true, prune rate is constant at args.final_density. Else, prune rate is annealed between args.init_density and args.final_density.'
+        )
+    
+    # hyperparameters for gradually pruning
+    parser.add_argument(
+        '--method', type=str, default='GraNet', help='method name: DST, GraNet, GraNet_uniform, GMP, GMO_uniform'
+        )
+    parser.add_argument(
+        '--init-density', type=float, default=0.0, help='The pruning rate / death rate for sparse pruning. Range: (0, 1).'
+        )
+    parser.add_argument(
+        '--final-density', type=float, default=0.05, help='The density of the overall sparse network. Must be less than args.init_density. Range: (0, 1).'
+        )
+    parser.add_argument(
+        '--const-prune-rate', type=float, default=0.05, help='If args.dst_prune_const is True, pruning is done at a constant rate. Range: (0, 1).'
+        )
+    parser.add_argument(
+        '--init-prune-epoch', type=int, default=0, help='The initial epoch for which pruning is done. Can be called a warmup period'
+        )
+    parser.add_argument(
+        '--final-prune-epoch', type=int, default=110, help='The final epoch for which pruning is done.'
+        )
+    parser.add_argument(
+        '--rm-first', action='store_true', help='Keep the first layer dense.'
+        )
 
     args = parser.parse_args()
 

@@ -17,14 +17,15 @@ from torch.utils.tensorboard import SummaryWriter
 from utils.logging import AverageMeter, ProgressMeter
 from utils.net_utils import save_checkpoint, get_lr, LabelSmoothing
 from utils.schedulers import get_policy
-from utils.conv_type import STRConv
+from utils.conv_type import STRConv, STRConvMask
 from utils.conv_type import sparseFunction
 
 from args import args
 from trainer import train, validate
+from core import GraNet, LinearDecay, CosineDecay
 
 import data
-import models
+from models import resnet
 
 
 def main():
@@ -41,14 +42,17 @@ def main():
 
 
 def main_worker(args):
-    args.gpu = None
+    # args.gpu = None
+    args.gpu = torch.cuda.current_device()
 
     if args.gpu is not None:
         print("Use GPU: {} for training".format(args.gpu))
 
     # create model and optimizer
     model = get_model(args)
+
     model = set_gpu(args, model)
+    print(f'Model Architecture: {model}')
 
     # Set up directories
     run_base_dir, ckpt_base_dir, log_base_dir = get_directories(args)
@@ -76,10 +80,21 @@ def main_worker(args):
     data = get_dataset(args)
     lr_policy = get_policy(args.lr_policy)(optimizer, args)
 
-    if args.label_smoothing is None:
-        criterion = nn.CrossEntropyLoss().cuda()
-    else:
-        criterion = LabelSmoothing(smoothing=args.label_smoothing)
+    # if args.label_smoothing is None:
+    #     criterion = nn.CrossEntropyLoss().cuda()
+    # else:
+    #     criterion = LabelSmoothing(smoothing=args.label_smoothing)
+
+    criterion = nn.CrossEntropyLoss().cuda()
+
+    mask = None
+    if args.sparse:
+        decay = CosineDecay(args.prune_rate, len(data.train_loader) * args.epochs)
+        # mask = GraNet(optimizer, prune_rate=args.death_rate, death_mode=args.prune, growth_mode=args.growth, 
+        #               redistribution_mode=args.redistribution, args=args, train_loader=data.train_loader, 
+        #               device=args.gpu, prune_rate_decay=decay)
+        # mask.add_module(model, sparse_init=args.sparse_init)
+        sparseInit(args, model)
 
     # optionally resume from a checkpoint
     best_acc1 = 0.0
@@ -109,42 +124,43 @@ def main_worker(args):
     args.start_epoch = args.start_epoch or 0
     acc1 = None
 
-    # Save the initial state
-    save_checkpoint(
-        {
-            "epoch": 0,
-            "arch": args.arch,
-            "state_dict": model.state_dict(),
-            "best_acc1": best_acc1,
-            "best_acc5": best_acc5,
-            "best_train_acc1": best_train_acc1,
-            "best_train_acc5": best_train_acc5,
-            "optimizer": optimizer.state_dict(),
-            "curr_acc1": acc1 if acc1 else "Not evaluated",
-        },
-        False,
-        filename=ckpt_base_dir / f"initial.state",
-        save=False,
-    )
+    # # Save the initial state
+    # save_checkpoint(
+    #     {
+    #         "epoch": 0,
+    #         "arch": args.arch,
+    #         "state_dict": model.state_dict(),
+    #         "best_acc1": best_acc1,
+    #         "best_acc5": best_acc5,
+    #         "best_train_acc1": best_train_acc1,
+    #         "best_train_acc5": best_train_acc5,
+    #         "optimizer": optimizer.state_dict(),
+    #         "curr_acc1": acc1 if acc1 else "Not evaluated",
+    #     },
+    #     False,
+    #     filename=ckpt_base_dir / f"initial.state",
+    #     save=False,
+    # )
 
     # Start training
+    # Modify to accomodate sparse_init training?
     for epoch in range(args.start_epoch, args.epochs):
         lr_policy(epoch, iteration=None)
         cur_lr = get_lr(optimizer)
 
         # Gradual pruning in GMP experiments
-        if args.conv_type == "GMPConv" and epoch >= args.init_prune_epoch and epoch <= args.final_prune_epoch:
-            total_prune_epochs = args.final_prune_epoch - args.init_prune_epoch + 1
-            for n, m in model.named_modules():
-                if hasattr(m, 'set_curr_prune_rate'):
-                    prune_decay = (1 - ((epoch - args.init_prune_epoch)/total_prune_epochs))**3
-                    curr_prune_rate = m.prune_rate - (m.prune_rate*prune_decay)
-                    m.set_curr_prune_rate(curr_prune_rate)
+        # if args.conv_type == "GMPConv" and epoch >= args.init_prune_epoch and epoch <= args.final_prune_epoch:
+        #     total_prune_epochs = args.final_prune_epoch - args.init_prune_epoch + 1
+        #     for n, m in model.named_modules():
+        #         if hasattr(m, 'set_curr_prune_rate'):
+        #             prune_decay = (1 - ((epoch - args.init_prune_epoch)/total_prune_epochs))**3
+        #             curr_prune_rate = m.prune_rate - (m.prune_rate*prune_decay)
+        #             m.set_curr_prune_rate(curr_prune_rate)
 
         # train for one epoch
         start_train = time.time()
         train_acc1, train_acc5 = train(
-            data.train_loader, model, criterion, optimizer, epoch, args, writer=writer
+            data.train_loader, model, criterion, optimizer, epoch, args, writer=writer, decay_scheduler=decay
         )
         train_time.update((time.time() - start_train) / 60)
 
@@ -193,11 +209,11 @@ def main_worker(args):
         end_epoch = time.time()
 
         # Storing sparsity and threshold statistics for STRConv models
-        if args.conv_type == "STRConv":
+        if args.conv_type == "STRConv" or args.conv_type == "STRConvMask":
             count = 0
             sum_sparse = 0.0
             for n, m in model.named_modules():
-                if isinstance(m, STRConv):
+                if isinstance(m, (STRConv, STRConvMask)):
                     sparsity, total_params, thresh = m.getSparsity()
                     writer.add_scalar("sparsity/{}".format(n), sparsity, epoch)
                     writer.add_scalar("thresh/{}".format(n), thresh, epoch)
@@ -219,11 +235,11 @@ def main_worker(args):
         base_config=args.config,
         name=args.name,
     )
-    if args.conv_type == "STRConv":
+    if args.conv_type == "STRConv" or args.conv_type == "STRConvMask":
         json_data = {}
         json_thres = {}
         for n, m in model.named_modules():
-            if isinstance(m, STRConv):
+            if isinstance(m, (STRConv, STRConvMask)):
                 sparsity = m.getSparsity()
                 json_data[n] = sparsity[0]
                 sum_sparse += int(((100 - sparsity[0]) / 100) * sparsity[1])
@@ -241,16 +257,20 @@ def main_worker(args):
 
 
 def set_gpu(args, model):
+    torch.cuda.empty_cache()
     if args.gpu is not None:
-        torch.cuda.set_device(args.gpu)
-        model = model.cuda(args.gpu)
+        # torch.cuda.set_device(args.gpu)
+        device = torch.device(args.gpu)
+        model = model.to(device)
     else:
         # DataParallel will divide and allocate batch_size to all available GPUs
         print(f"=> Parallelizing on {args.multigpu} gpus")
-        torch.cuda.set_device(args.multigpu[0])
-        args.gpu = args.multigpu[0]
+        # torch.cuda.set_device(args.multigpu[0])
+        torch.cuda.device(args.multigpu[0])
+        # args.gpu = args.multigpu[0]
+        args.gpu = torch.cuda.device(args.multigpu[0])
         model = torch.nn.DataParallel(model, device_ids=args.multigpu).cuda(
-            args.multigpu[0]
+            args.gpu
         )
 
     cudnn.benchmark = True
@@ -298,7 +318,7 @@ def pretrained(args, model):
                 if (k in model_state_dict and v.size() == model_state_dict[k].size())
             }
 
-            if args.conv_type != "STRConv":
+            if args.conv_type != "STRConv" and args.conv_type != "STRConvMask":
                 for k, v in pretrained.items():
                     if 'sparseThreshold' in k:
                         wkey = k.split('sparse')[0] + 'weight'
@@ -341,11 +361,26 @@ def get_model(args):
         args.first_layer_type = "DenseConv"
 
     print("=> Creating model '{}'".format(args.arch))
-    model = models.__dict__[args.arch]()
+    # model = models.__dict__[args.arch]()
+    model = None
+    if args.set == "CIFAR10":
+        model = resnet.ResNet18(num_classes=10)
 
+    if args.set == "CIFAR100":
+        model = resnet.ResNet18(num_classes=100)
+
+    if args.set == "imagenet":
+        model = resnet.ResNet50(num_classes=1000)
+    
+    if args.set == "tiny-imagenet":
+        model = resnet.ResNet50(num_classes=200)
+
+    if model is None:
+        raise ValueError("Model not found!")
+    
     print(f"=> Num model params {sum(p.numel() for p in model.parameters())}")
 
-    # applying sparsity to the network
+    # applying sparsity to the network for DNWConv and GMPConv
     if args.conv_type != "DenseConv":
 
         print(f"==> Setting prune rate of network to {args.prune_rate}")
@@ -408,6 +443,55 @@ def get_optimizer(args, model):
         )
 
     return optimizer
+
+def sparseInit(args, model):
+    if args.sparse_init == 'uniform':
+        for n, m in model.named_modules():
+            if isinstance(m, (STRConv, STRConvMask)):
+                m.set_er_mask(args.init_density)
+                print(n)
+
+    elif args.sparse_init == 'ERK':
+        sparsity_list = []
+        num_params_list = []
+        total_params = 0
+        for n, m in model.named_modules():
+            if isinstance(m, (STRConv, STRConvMask)):
+                sparsity_list.append(torch.tensor(m.weight.shape).sum() / m.weight.numel())
+                num_params_list.append(m.weight.numel())
+                total_params += m.weight.numel()
+
+        num_params_kept = (torch.tensor(sparsity_list) * torch.tensor(num_params_list)).sum()
+        num_params_to_keep = total_params * args.init_density
+        C = num_params_to_keep / num_params_kept
+        sparsity_list = [torch.clamp(C * s, 0, 1) for s in sparsity_list]
+        layer = 0
+        for n, m in model.named_modules():
+            if isinstance(m, (STRConv, STRConvMask)):
+                m.set_er_mask(sparsity_list[layer])
+                layer += 1
+        print(sparsity_list)
+
+    elif args.sparse_init == 'balanced':
+        total_params = 0
+        layers = 0
+        sparsity_list = []
+        for n, m in model.named_modules():
+            if isinstance(m, (STRConv, STRConvMask)):
+                total_params += m.weight.numel()
+                layers += 1
+
+        X = args.init_density * total_params / layers
+
+        for n, m in model.named_modules():
+            if isinstance(m, (STRConv, STRConvMask)):
+                sparsity_list.append(torch.clamp(X / m.weight.numel(), 0, 1))
+
+        layer = 0
+        for n, m in model.named_modules():
+            if isinstance(m, (STRConv, STRConvMask)):
+                m.set_er_mask(sparsity_list[layer])
+                layer += 1
 
 
 def _run_dir_exists(run_base_dir):
