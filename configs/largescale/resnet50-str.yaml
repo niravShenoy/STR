@@ -29,5 +29,21 @@ nonlinearity: relu
 sparse_function: sigmoid
 sInit_value: -3200 # Change this according to reported numbers in appendix
 
+# ===== Sparse Initialization =========== #
+sparse_init: balanced
+init_density: 0.3
+
+# ===== GraNet Parameters ========#
+sparse: True
+method: None
+cosine_prune_rate: 0.1
+death_rate: 0.5 # Not needed
+prune_rate: 0.5    # Check usage of this parameter. Should be redundant as init_density is used for sparse_init
+final_density: 0.05
+init_prune_epoch: 35
+final_prune_epoch: 50
+update_frequency: 3
+# l2: 0.0005
+
 # ===== Hardware setup ===== #
 workers: 20

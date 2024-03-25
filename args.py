@@ -19,6 +19,12 @@ def parse_arguments():
     parser.add_argument(
         "-a", "--arch", metavar="ARCH", default="ResNet18", help="model architecture"
     )
+    parser.add_argument(
+        "--resnet-type", type=str, default='small-dense', help="resnet-width"
+    )
+    parser.add_argument(
+        "--width", type=int, default=64, help="width resnet small dense"
+    )
     
     # parser.add_argument(
     #     "--config", help="Config file to use (see configs dir)", default=None
@@ -43,6 +49,13 @@ def parse_arguments():
         type=int,
         metavar="N",
         help="number of total epochs to run",
+    )
+    parser.add_argument(
+        "--iterations",
+        default=1,
+        type=int,
+        metavar="N",
+        help="total number runs of STR",
     )
     parser.add_argument(
         "--start-epoch",
@@ -71,13 +84,22 @@ def parse_arguments():
         dest="lr",
     )
     parser.add_argument(
-        "--warmup_length", default=0, type=int, help="Number of warmup iterations"
+        "--lr_min", default=0.01, type=float, metavar="LR-min", help="Minimum value LR can decay to"
+    )
+    parser.add_argument(
+        "--warmup", action='store_true', default=True
+    )
+    parser.add_argument(
+        "--warmup_length", default=10, type=int, help="Number of warmup iterations"
+    )
+    parser.add_argument(
+        "--warmup-lr", type=float, default=0.01
     )
     parser.add_argument(
         "--init_prune_epoch", default=0, type=int, help="Init epoch for pruning in GMP"
     )
     parser.add_argument(
-        "--final_prune_epoch", default=-100, type=int, help="Final epoch for pruning in GMP"
+        "--final_prune_epoch", default=-1, type=int, help="Final epoch for pruning in GMP"
     )
     parser.add_argument(
         "--momentum", default=0.9, type=float, metavar="M", help="momentum"
@@ -138,7 +160,10 @@ def parse_arguments():
         "--lr-policy", default="constant_lr", help="Policy for the learning rate."
     )
     parser.add_argument(
-        "--multistep-lr-adjust", default=30, type=int, help="Interval to drop lr"
+        "--prune-scheduler", type=str, default='cosine_lr', help="Scheduler to use for sparse init pruning"
+    )
+    parser.add_argument(
+        "--multistep-lr-adjust", default=60, type=int, help="Interval to drop lr"
     )
     parser.add_argument(
         "--multistep-lr-gamma", default=0.1, type=int, help="Multistep multiplier"
@@ -151,10 +176,10 @@ def parse_arguments():
     )
     parser.add_argument(
         "--prune-rate",
-        default=0.0,
+        default=0.2,
         help="Amount of pruning to do during sparse training",
         type=float,
-    )
+    )   # Clarify the usage of this argument
     parser.add_argument(
         "--width-mult",
         default=1.0,
@@ -171,7 +196,7 @@ def parse_arguments():
         "--random-mask",
         action="store_true",
         help="Whether or not to use a random mask when fine tuning for lottery experiments",
-    )
+    )   # Not used
     parser.add_argument(
         "--one-batch",
         action="store_true",
@@ -232,7 +257,7 @@ def parse_arguments():
         "--sInit-value",
         type=float,
         help="initial value for sInit",
-        default=100,
+        default=-100,
     )
 
     parser.add_argument(
@@ -249,30 +274,33 @@ def parse_arguments():
     # Dynamic Sparse Training related arguments
     parser.add_argument(
         '--growth', type=str, default='gradient', help='Growth mode. Choose from: momentum, random, and momentum_neuron.'
-        )
+        )  # Not used
     parser.add_argument(
         '--prune', type=str, default='magnitude', help='Death mode / pruning mode. Choose from: magnitude, SET, threshold, CS_death.'
-        )
+        )  # Not used
     parser.add_argument(
         '--redistribution', type=str, default='none', help='Redistribution mode. Choose from: momentum, magnitude, nonzeros, or none.'
-        )
+        )  # Not used
     parser.add_argument(
-        '-- -rate', type=float, default=0.50, help='The pruning rate / death rate for Zero-Cost Neuroregeneration.'
-        )
+        '--rate', type=float, default=0.50, help='The pruning rate / death rate for Zero-Cost Neuroregeneration.'
+        )   # Not used
     parser.add_argument(
         '--pruning-rate', type=float, default=0.50, help='The pruning rate / death rate.'
+        )    # Not used
+    parser.add_argument(
+        '--cosine-prune-rate', type=float, default=0.50, help='The Cosine annealed pruning rate.'
         )
     parser.add_argument(
-        '--sparse', action='store_true', help='Enable sparse mode. Default: True.'
+        '--sparse', action='store_true', help='Enable sparse mode. Default: True. If False, Dense Training is done.'
         )
     parser.add_argument(
         '--fix', action='store_true', help='Fix topology during training. Default: True.'
         )
     parser.add_argument(
-        '--update-frequency', type=int, default=100, metavar='N', help='how many iterations to train between mask update'
+        '--update-frequency', type=int, default=None, metavar='N', help='Number of epochs per GraNet mask update'
         )
     parser.add_argument(
-        '--sparse-init', type=str, default='ERK, uniform distributions for sparse training, global pruning and uniform pruning for pruning', help='sparse initialization'
+        '--sparse-init', type=str, default='None', help='Sparse initialization method. Choose from: ERK, balanced, uniform. '
         )
     parser.add_argument(
         '--dst-prune-const', action='store_true', help='If true, prune rate is constant at args.final_density. Else, prune rate is annealed between args.init_density and args.final_density.'
@@ -280,23 +308,25 @@ def parse_arguments():
     
     # hyperparameters for gradually pruning
     parser.add_argument(
-        '--method', type=str, default='GraNet', help='method name: DST, GraNet, GraNet_uniform, GMP, GMO_uniform'
+        '--method', type=str, default='GraNet', help='method name: DST, GraNet, GraNet_uniform, GMP, GMO_uniform, None'
         )
     parser.add_argument(
-        '--init-density', type=float, default=0.0, help='The pruning rate / death rate for sparse pruning. Range: (0, 1).'
+        '--init-density', type=float, default=1.0, help='The sparsity to be achieved by initial sparse pruning (ERK, balanced, uniform, etc). Range: (0, 1).'
         )
     parser.add_argument(
-        '--final-density', type=float, default=0.05, help='The density of the overall sparse network. Must be less than args.init_density. Range: (0, 1).'
+        '--final-density', type=float, default=1.0, 
+        help='The density of the final sparse network for GraNet. Must be less than args.init_density. Range: (0, 1).'
         )
     parser.add_argument(
-        '--const-prune-rate', type=float, default=0.05, help='If args.dst_prune_const is True, pruning is done at a constant rate. Range: (0, 1).'
+        '--const-prune-rate', type=float, default=0.05, 
+        help='If args.dst_prune_const is True, pruning during GraNet is done at a constant rate. Else, init_density and final_density are used to create an annealed pruning rate. Range: (0, 1).'
         )
     parser.add_argument(
         '--init-prune-epoch', type=int, default=0, help='The initial epoch for which pruning is done. Can be called a warmup period'
         )
     parser.add_argument(
         '--final-prune-epoch', type=int, default=110, help='The final epoch for which pruning is done.'
-        )
+        ) # GraNet trains the model for 30 epochs after the final pruning epoch is done
     parser.add_argument(
         '--rm-first', action='store_true', help='Keep the first layer dense.'
         )

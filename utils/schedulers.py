@@ -35,6 +35,14 @@ def constant_lr(optimizer, args, **kwargs):
 
     return _lr_adjuster
 
+def warmup_lr(optimizer, args, **kwargs):
+    def _lr_adjuster(epoch):
+        lr = _warmup_lr(args.lr, args.warmup_length, epoch)
+
+        assign_learning_rate(optimizer, lr)
+
+    return _lr_adjuster
+
 
 def cosine_lr(optimizer, args, **kwargs):
     def _lr_adjuster(epoch, iteration):
@@ -43,7 +51,7 @@ def cosine_lr(optimizer, args, **kwargs):
         else:
             e = epoch - args.warmup_length
             es = args.epochs - args.warmup_length
-            lr = 0.5 * (1 + np.cos(np.pi * e / es)) * args.lr
+            lr = args.lr_min + 0.5 * (1 + np.cos(np.pi * e / es)) * (args.lr - args.lr_min)
 
         assign_learning_rate(optimizer, lr)
 
@@ -67,7 +75,7 @@ def efficientnet_lr(optimizer, args, **kwargs):
 
 
 def multistep_lr(optimizer, args, **kwargs):
-    """Sets the learning rate to the initial LR decayed by 10 every 30 epochs"""
+    """Sets the learning rate to the initial LR decayed by 10 every 60 epochs by default"""
 
     def _lr_adjuster(epoch, iteration):
         lr = args.lr * (args.lr_gamma ** (epoch // args.lr_adjust))

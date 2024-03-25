@@ -12,22 +12,26 @@ num_classes: 10
 optimizer: sgd
 # lr: 0.256
 lr: 0.1
-lr_policy: cosine_lr
-# warmup_length: 5
-warmup_length: 0
+# lr_min: 0.01
+lr_policy: multistep_lr
+
+# Uncomment in case of Multistep LR
+lr_gamma: 0.1
+lr_adjust: 30
+
+warmup_length: 10
 
 # ===== Network training config ===== #
-epochs: 160
+epochs: 50
 # weight_decay: 0.00002251757813 # Change this according to reported numbers in appendix
-weight_decay: 0.0001
+weight_decay: 0.0005
 # momentum: 0.875
 momentum: 0.9
-# batch_size: 256
-batch_size: 128
-label_smoothing: 0.1
-final_prune_epoch: 30
+batch_size: 256
+# label_smoothing: 0.1
+# final_prune_epoch: 30
 
-# ===== Sparsity =========== #
+# ===== STR =========== #
 conv_type: STRConvMask
 bn_type: LearnedBatchNorm
 init: kaiming_normal
@@ -35,18 +39,21 @@ mode: fan_in
 nonlinearity: relu
 sparse_function: sigmoid
 sInit_value: -200 # Change this according to reported numbers in appendix
+iterations: 2
+
+# ===== Sparse Initialization =========== #
+sparse_init: balanced
+init_density: 0.5
 
 # ===== GraNet Parameters ========#
-sparse: True
-method: GraNet
-death_rate: 0.5
-# optimizer: sgd
-sparse_init: ERK
-prune_rate: 0.3
-init_density: 0.5
-final_density: 0.10
-update_frequency: 1000
-l2: 0.0005
+sparse: False
+method: None
+prune_rate: 0.2
+# final_density: 0.05
+init_prune_epoch: 80
+final_prune_epoch: 120
+update_frequency: 5
+# l2: 0.0005
 
 # ===== Hardware setup ===== #
 workers: 2

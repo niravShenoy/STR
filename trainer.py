@@ -16,6 +16,7 @@ def magnitude_death(mask, weight, prune_rate, num_nonzeros, num_zeros):
 
     if num_remove == 0.0:
         return weight.data != 0.0
+    
     k = math.ceil(num_zeros + num_remove)
 
     x1, _ = torch.sort(torch.abs(weight.data[mask == 1.0]), descending=True) # Alternate logic to extract the top [(1 - prune_rate) * num_nonzeros] elements
@@ -24,21 +25,35 @@ def magnitude_death(mask, weight, prune_rate, num_nonzeros, num_zeros):
     x, _ = torch.sort(torch.abs(weight.data.view(-1)))      # Method used in GraNet implementation
     threshold = x[k-1].item()
 
-    assert threshold1 == threshold, f"Threshold mismatch {threshold1} != {threshold}"
+    # assert threshold1 == threshold, f"Threshold mismatch {threshold1} != {threshold}"
 
-    return (torch.abs(weight.data) > threshold1).float()
+    # Create a mask such that the indices of the top k elements are 1 and the rest are 0
+    return (torch.abs(weight.data) > threshold).float()
 
 def gradient_growth(mask, weight, num_pruned):
     grad = weight.grad
-    grad = grad * (mask == 0.0).float()
+    masked = (mask == 0.0).float()
+    grad = grad * masked
     x, _ = torch.sort(torch.abs(grad.view(-1)), descending=True)
     threshold = x[num_pruned].item()
-    # assert threshold > 0.0, f"Threshold is: {threshold}"
     grad_mask = (torch.abs(grad) > threshold).float()
-    # assert grad_mask.sum().item() == num_pruned, f"Number of elements in grad_mask {grad_mask.sum().item()} != {num_pruned}"
+
+    # If threshold is 0 (can occur in the ultra-sparse regime), logic to ensure that non-zero elements remain the same before and after prune and grow
+    # Randomly select elements from the mask to regrow
+    num_grown = grad_mask.sum().item()
+    if num_pruned > num_grown:
+        num_remain = int(num_pruned - num_grown)
+        new_grad_mask = (mask == 0.0).float() * (grad_mask == 0.0).float()
+        indices = torch.nonzero(new_grad_mask)
+        shuffled_indices = indices[torch.randperm(indices.size(0))]
+        regrow_indices = shuffled_indices[:num_remain]
+        grad_mask[regrow_indices[:, 0], regrow_indices[:, 1], regrow_indices[:, 2], regrow_indices[:, 3]] = 1.0
+
+    assert grad_mask.sum().item() == num_pruned, f"Number of elements in grad_mask {grad_mask.sum().item()} != {num_pruned}"
+        
     return grad_mask
 
-def pruning(model, args, step, train_loader_len):
+def pruning(model, args, prune_step):
     """
     Prunes the model based on the defined arguments and current training step. Retains the weights but updates the mask.
 
@@ -48,15 +63,19 @@ def pruning(model, args, step, train_loader_len):
         step (int): The current training step.
 
     Returns:
-        None
+        None]
     """
 
-    curr_prune_iter = step // args.update_frequency
-    final_iter = int((args.final_prune_epoch * train_loader_len) / args.update_frequency)
-    init_iter = int((args.init_prune_epoch * train_loader_len) / args.update_frequency)
-    total_iter = final_iter - init_iter
+    final_step = int(args.final_prune_epoch / args.update_frequency)
+    init_step = int(args.init_prune_epoch / args.update_frequency)
+    total_step = final_step - init_step
+
+    print('******************************************************')
+    print(f'Pruning Progress is {prune_step - init_step} / {total_step}')
+    print('******************************************************')
 
     # Conditions for Pruning. Omit if you want to prune based on epochs instead of steps
+    assert final_step > init_step, 'Final step must be greater than initial step'
     assert args.init_density > args.final_density, 'Initial density must be greater than final density'
 
     if args.dst_prune_const:    # Whether to prune at a constant rate or anneal the pruning rate based on iteration
@@ -64,8 +83,8 @@ def pruning(model, args, step, train_loader_len):
         curr_prune_rate = args.const_prune_rate
     else:
         # Using a version of eqn. 1 from section 4.1 the GraNet paper
-        if curr_prune_iter >= init_iter and curr_prune_iter <= final_iter - 1:
-            prune_decay = (1 - ((curr_prune_iter - init_iter) / total_iter)) ** 3
+        if prune_step >= init_step and prune_step <= final_step - 1:
+            prune_decay = (1 - ((prune_step - init_step) / total_step)) ** 3
             curr_prune_rate = (1 - args.init_density) + (args.init_density - args.final_density) * (
                     1 - prune_decay)
         else:
@@ -138,6 +157,8 @@ def truncate_weights(model, prune_rate):
 
     # Grow
     layer = 0
+    total_retained = 0.0
+    total_params = 0.0
     for n, m in model.named_modules():
         if isinstance(m, (STRConv, STRConvMask)):
             mask = m.mask
@@ -151,27 +172,39 @@ def truncate_weights(model, prune_rate):
             # assert m.mask.sum().item() - updated_mask[layer].sum().item() == num_pruned[layer], f"Layer {layer}: Name:{n} -> Pruning and Regeneration mismatch. {m.mask.sum().item()} != {num_nonzeros[layer]}"
 
             print(f"{n}: Density: {m.mask.sum().item() / m.mask.numel()}")
+            total_retained += m.mask.sum().item()
+            total_params += m.mask.numel()
             layer += 1
 
+    print(f"Overall Density: {total_retained / total_params}")
 
-def step(model, optimizer, args, step, train_loader_len, decay_scheduler=None):
-    optimizer.step()
-    # Get prune rate based on CosineDecay or LinearDecay
-    # Cosine Decay step
+def log_mask_sparsity(model, writer, step, train_loader_len):
+    # Log the mask sparsity
+    for n, m in model.named_modules():
+        if isinstance(m, STRConvMask):
+            maskSparsity, _ = m.getMaskSparsity()
+            writer.add_scalar("mask_sparsity/{}".format(n), maskSparsity, (step // train_loader_len))
+
+
+def step(model, args, step, train_loader_len, decay_scheduler=None):
+
+    # Decay the pruning rate as the network trains. Used in truncate_weights()
     if decay_scheduler is not None:
         decay_scheduler.step()
         prune_rate = decay_scheduler.get_dr()
     
-    # Condition needs to be modified (in value and in logic) if we prune based on epochs instead of steps
     if args.update_frequency is not None:
         if args.method == 'GraNet':
             # Set up a warmup period since we want GraNet to come into the picture in the high sparsity regime
-            if step >= (args.init_prune_epoch * train_loader_len) and step % args.update_frequency == 0:
-                # Do we perform pruning if STR is anyway going to prune?
-                pruning(model, args, step, train_loader_len)
+            if step >= (args.init_prune_epoch * train_loader_len) and step % (args.update_frequency * train_loader_len) == 0:
+                prune_step = step // (args.update_frequency * train_loader_len)
+                pruning(model, args, prune_step)
                 truncate_weights(model, prune_rate)
-                
 
+        elif args.method == 'prune_and_grow':
+            if step >= (args.init_prune_epoch * train_loader_len) and step % (args.update_frequency * train_loader_len) == 0 and step <= (args.final_prune_epoch * train_loader_len):
+                # Omit GraNet pruning and only perform neuroregeneration
+                truncate_weights(model, prune_rate)
 
 def train(train_loader, model, criterion, optimizer, epoch, args, writer, decay_scheduler=None):
     batch_time = AverageMeter("Time", ":6.3f")
@@ -184,6 +217,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args, writer, decay_
         [batch_time, data_time, losses, top1, top5],
         prefix=f"Epoch: [{epoch}]",
     )
+    # step_count = 0
 
     # switch to train mode
     model.train()
@@ -216,13 +250,14 @@ def train(train_loader, model, criterion, optimizer, epoch, args, writer, decay_
         # compute gradient and do SGD step
         optimizer.zero_grad()
         loss.backward()
-        if args.sparse:
-            # Can avoid steps and use epochs instead (do every 5-10 epochs)
-            # This means the logic in step() must be changed to use epochs instead of steps
-            num_steps = (epoch * batch_len) + i
-            step(model, optimizer, args, num_steps, batch_len, decay_scheduler)
-        else:
-            optimizer.step()
+        optimizer.step()
+
+        num_steps = (epoch * batch_len) + i
+        # step_count += 1
+        if args.sparse and args.method != 'None':
+            step(model, args, num_steps, batch_len, decay_scheduler)
+            
+        log_mask_sparsity(model, writer, num_steps, batch_len)
 
         # measure elapsed time
         batch_time.update(time.time() - end)
@@ -233,6 +268,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args, writer, decay_
             progress.display(i)
             progress.write_to_tensorboard(writer, prefix="train", global_step=t)
 
+    # print(f"Total steps: {step_count}")
     return top1.avg, top5.avg
 
 
